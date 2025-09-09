@@ -31,9 +31,9 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ message: 'Nama kategori dan tipe tidak boleh kosong' });
     }
     try {
-        const query = 'INSERT INTO kategori (nama_kategori, tipe) VALUES (?, ?)';
-        const [results] = await db.query(query, [nama_kategori, tipe]);
-        res.status(201).json({ message: 'Kategori berhasil dibuat!', id: results.insertId });
+        const query = 'INSERT INTO kategori (nama_kategori, tipe) VALUES ($1, $2) RETURNING id';
+        const results = await db.query(query, [nama_kategori, tipe]);
+        res.status(201).json({ message: 'Kategori berhasil dibuat!', id: results.rows[0].id });
     } catch (error) {
         // ... (Error handling tetap sama)
     }

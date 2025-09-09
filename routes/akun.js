@@ -23,9 +23,10 @@ router.post('/', async (req, res) => {
     }
     const saldo = saldo_awal ? parseFloat(saldo_awal) : 0;
     try {
-        const query = 'INSERT INTO akun (nama_akun, saldo_awal, saldo_saat_ini) VALUES (?, ?, ?)';
-        const [results] = await db.query(query, [nama_akun, saldo, saldo]);
-        res.status(201).json({ message: 'Akun berhasil dibuat!', id: results.insertId });
+        // Perhatikan $1, $2, $3 sebagai placeholder dan RETURNING id
+        const query = 'INSERT INTO akun (nama_akun, saldo_awal, saldo_saat_ini) VALUES ($1, $2, $3) RETURNING id';
+        const results = await db.query(query, [nama_akun, saldo, saldo]);
+        res.status(201).json({ message: 'Akun berhasil dibuat!', id: results.rows[0].id });
     } catch (error) {
         if (error.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({ message: 'Nama akun sudah ada.', error: error.message });
