@@ -29,6 +29,6 @@ app.use('/laporan', laporanRoutes);
 app.use('/akun', akunRoutes);
 app.use('/transaksi', transaksiRoutes); // <-- BARIS BARU
 
-app.listen(PORT, () => {
-    console.log(`Server berjalan di port http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server berjalan di port ${PORT}`);
 });
