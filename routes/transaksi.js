@@ -1,13 +1,15 @@
-// routes/transaksi.js
+// routes/transaksi.js (VERSI BARU UNTUK POSTGRES)
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
-// Endpoint GET - Mengambil SEMUA transaksi, SEKARANG BISA FILTER KATEGORI & TANGGAL
+// --- PENTING: Semua query di file ini diubah untuk Postgres ---
+
+// Endpoint GET - Mengambil SEMUA transaksi
 router.get('/', async (req, res) => {
     const { tanggal_mulai, tanggal_akhir, id_kategori } = req.query;
 
-    let query = `
+    let baseQuery = `
         SELECT
             t.id, t.tanggal, t.keterangan, t.jumlah, t.tipe,
             a.nama_akun, k.nama_kategori, t.id_akun, t.id_kategori
@@ -15,224 +17,190 @@ router.get('/', async (req, res) => {
         LEFT JOIN akun a ON t.id_akun = a.id
         LEFT JOIN kategori k ON t.id_kategori = k.id
     `;
+    
+    const conditions = [];
     const params = [];
-    let conditions = [];
+    let paramIndex = 1;
 
-    // Filter berdasarkan tanggal
     if (tanggal_mulai && tanggal_akhir) {
-        conditions.push('t.tanggal BETWEEN ? AND ?');
+        conditions.push(`t.tanggal BETWEEN $${paramIndex++} AND $${paramIndex++}`);
         params.push(tanggal_mulai, `${tanggal_akhir} 23:59:59`);
     }
 
-    // Filter berdasarkan kategori (bisa lebih dari satu)
     if (id_kategori) {
-        // Ubah string "1,2,3" menjadi array [1, 2, 3]
         const kategoriIds = id_kategori.split(',').map(id => parseInt(id.trim(), 10));
         if (kategoriIds.length > 0) {
-            conditions.push(`t.id_kategori IN (?)`);
-            params.push(kategoriIds);
+            const placeholders = kategoriIds.map(() => `$${paramIndex++}`).join(',');
+            conditions.push(`t.id_kategori IN (${placeholders})`);
+            params.push(...kategoriIds);
         }
     }
 
-    // Gabungkan semua kondisi filter
     if (conditions.length > 0) {
-        query += ' WHERE ' + conditions.join(' AND ');
+        baseQuery += ' WHERE ' + conditions.join(' AND ');
     }
 
-    query += ' ORDER BY t.tanggal DESC, t.id DESC';
+    baseQuery += ' ORDER BY t.tanggal DESC, t.id DESC';
 
     try {
-        const [results] = await db.query(query, params);
-        res.status(200).json(results);
+        const { rows } = await db.query(baseQuery, params);
+        res.status(200).json(rows);
     } catch (error) {
         console.error('Error saat mengambil semua transaksi:', error);
         res.status(500).json({ message: 'Gagal mengambil data transaksi', error: error.message });
     }
 });
 
-// Endpoint 2: GET - Mengambil semua transaksi untuk SATU AKUN SPESIFIK
-// :idAkun adalah parameter dinamis yang akan kita ambil dari URL
+// Endpoint GET - Mengambil semua transaksi untuk SATU AKUN SPESIFIK
 router.get('/akun/:id', async (req, res) => {
     const { id } = req.params;
     const { tanggal_mulai, tanggal_akhir, id_kategori } = req.query;
 
-    let query = `
+    let baseQuery = `
         SELECT
             t.id, t.id_akun, t.id_kategori, t.tanggal, t.keterangan, t.jumlah, t.tipe,
             k.nama_kategori
         FROM transaksi t
         LEFT JOIN kategori k ON t.id_kategori = k.id
     `;
-    const params = [];
-    let conditions = ['t.id_akun = ?']; // Filter by akun ID is always active
-    params.push(id);
+    
+    const conditions = [`t.id_akun = $1`];
+    const params = [id];
+    let paramIndex = 2; // Mulai dari $2 karena $1 sudah dipakai
 
-    // Filter tambahan berdasarkan tanggal
     if (tanggal_mulai && tanggal_akhir) {
-        conditions.push('t.tanggal BETWEEN ? AND ?');
+        conditions.push(`t.tanggal BETWEEN $${paramIndex++} AND $${paramIndex++}`);
         params.push(tanggal_mulai, `${tanggal_akhir} 23:59:59`);
     }
 
-    // Filter tambahan berdasarkan kategori
     if (id_kategori) {
         const kategoriIds = id_kategori.split(',').map(id => parseInt(id.trim(), 10));
         if (kategoriIds.length > 0) {
-            conditions.push(`t.id_kategori IN (?)`);
-            params.push(kategoriIds);
+            const placeholders = kategoriIds.map(() => `$${paramIndex++}`).join(',');
+            conditions.push(`t.id_kategori IN (${placeholders})`);
+            params.push(...kategoriIds);
         }
     }
 
-    query += ' WHERE ' + conditions.join(' AND ');
-    query += ' ORDER BY t.tanggal DESC, t.id DESC';
+    baseQuery += ' WHERE ' + conditions.join(' AND ');
+    baseQuery += ' ORDER BY t.tanggal DESC, t.id DESC';
 
     try {
-        const [results] = await db.query(query, params);
-        res.status(200).json(results);
+        const { rows } = await db.query(baseQuery, params);
+        res.status(200).json(rows);
     } catch (error) {
         console.error('Error saat mengambil transaksi per akun:', error);
         res.status(500).json({ message: 'Gagal mengambil data transaksi', error: error.message });
     }
 });
 
+// --- LOGIKA TRANSAKSI DIUBAH TOTAL UNTUK POSTGRES ---
+// Kita akan menggunakan 'client' dari pool untuk menangani transaksi
 
-// Endpoint 3: POST - Membuat transaksi baru (INI BAGIAN UTAMANYA)
+// Endpoint POST - Membuat transaksi baru
 router.post('/', async (req, res) => {
-    // Ambil semua data yang dibutuhkan dari body
     const { id_akun, id_kategori, tanggal, keterangan, jumlah, tipe } = req.body;
-
-    // Validasi input dasar
     if (!id_akun || !jumlah || !tipe || !tanggal) {
-        return res.status(400).json({ message: 'Input tidak lengkap: id_akun, jumlah, tipe, dan tanggal wajib diisi.' });
+        return res.status(400).json({ message: 'Input tidak lengkap.' });
     }
 
-    // Dapatkan satu koneksi dari pool untuk memulai transaction
-    const connection = await db.getConnection();
+    const client = await db.getClient(); // Ambil satu koneksi client dari pool
 
     try {
-        // --- MULAI TRANSACTION ---
-        await connection.beginTransaction();
+        await client.query('BEGIN'); // Mulai transaksi
 
-        // 1. Insert data ke tabel 'transaksi'
-        const transaksiQuery = 'INSERT INTO transaksi (id_akun, id_kategori, tanggal, keterangan, jumlah, tipe) VALUES (?, ?, ?, ?, ?, ?)';
-        await connection.query(transaksiQuery, [id_akun, id_kategori, tanggal, keterangan, jumlah, tipe]);
+        const transaksiQuery = 'INSERT INTO transaksi (id_akun, id_kategori, tanggal, keterangan, jumlah, tipe) VALUES ($1, $2, $3, $4, $5, $6)';
+        await client.query(transaksiQuery, [id_akun, id_kategori, tanggal, keterangan, jumlah, tipe]);
 
-        // 2. Update 'saldo_saat_ini' di tabel 'akun'
-        // Tentukan apakah jumlah akan ditambah atau dikurang dari saldo
         const jumlahUpdate = tipe === 'pemasukan' ? parseFloat(jumlah) : -parseFloat(jumlah);
-        
-        const akunQuery = 'UPDATE akun SET saldo_saat_ini = saldo_saat_ini + ? WHERE id = ?';
-        await connection.query(akunQuery, [jumlahUpdate, id_akun]);
+        const akunQuery = 'UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2';
+        await client.query(akunQuery, [jumlahUpdate, id_akun]);
 
-        // Jika semua query berhasil, commit transaction
-        await connection.commit();
-        // --- TRANSACTION SELESAI ---
-
+        await client.query('COMMIT'); // Selesaikan transaksi jika semua berhasil
         res.status(201).json({ message: 'Transaksi berhasil dibuat!' });
-
     } catch (error) {
-        // Jika terjadi error, batalkan semua perubahan
-        await connection.rollback();
+        await client.query('ROLLBACK'); // Batalkan semua jika ada error
         console.error('Error saat membuat transaksi:', error);
         res.status(500).json({ message: 'Gagal membuat transaksi, semua perubahan dibatalkan.', error: error.message });
     } finally {
-        // Penting! Kembalikan koneksi ke pool setelah selesai
-        connection.release();
+        client.release(); // PENTING! Kembalikan client ke pool
     }
 });
 
-
-// routes/transaksi.js (lanjutan...)
-
-// Endpoint 4: DELETE - Menghapus transaksi
+// Endpoint DELETE - Menghapus transaksi
 router.delete('/:id', async (req, res) => {
-    const { id } = req.params; // Ambil ID transaksi dari URL
-    const connection = await db.getConnection();
+    const { id } = req.params;
+    const client = await db.getClient();
 
     try {
-        await connection.beginTransaction();
+        await client.query('BEGIN');
 
-        // 1. Ambil dulu detail transaksi yang akan dihapus (kita butuh id_akun dan jumlahnya)
-        const [rows] = await connection.query('SELECT * FROM transaksi WHERE id = ?', [id]);
+        const { rows } = await client.query('SELECT * FROM transaksi WHERE id = $1', [id]);
         if (rows.length === 0) {
             throw new Error('Transaksi tidak ditemukan.');
         }
         const trxToDelete = rows[0];
 
-        // 2. Hapus transaksi dari tabel 'transaksi'
-        await connection.query('DELETE FROM transaksi WHERE id = ?', [id]);
+        await client.query('DELETE FROM transaksi WHERE id = $1', [id]);
 
-        // 3. Kembalikan saldo di tabel 'akun'
-        // Logikanya dibalik: jika itu pemasukan, kita kurangi saldonya. jika pengeluaran, kita tambah saldonya.
         const jumlahUpdate = trxToDelete.tipe === 'pemasukan' ? -parseFloat(trxToDelete.jumlah) : parseFloat(trxToDelete.jumlah);
-
-        const akunQuery = 'UPDATE akun SET saldo_saat_ini = saldo_saat_ini + ? WHERE id = ?';
-        await connection.query(akunQuery, [jumlahUpdate, trxToDelete.id_akun]);
-
-        // Jika semua berhasil, commit
-        await connection.commit();
-
+        const akunQuery = 'UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2';
+        await client.query(akunQuery, [jumlahUpdate, trxToDelete.id_akun]);
+        
+        await client.query('COMMIT');
         res.status(200).json({ message: 'Transaksi berhasil dihapus!' });
-
     } catch (error) {
-        // Jika gagal, batalkan semua
-        await connection.rollback();
+        await client.query('ROLLBACK');
         console.error('Error saat menghapus transaksi:', error);
         res.status(500).json({ message: 'Gagal menghapus transaksi.', error: error.message });
     } finally {
-        // Selalu kembalikan koneksi
-        connection.release();
+        client.release();
     }
 });
 
-// routes/transaksi.js (lanjutan...)
-
-// Endpoint 5: PUT - Mengubah/mengedit transaksi
+// Endpoint PUT - Mengubah/mengedit transaksi
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
     const { id_akun, id_kategori, tanggal, keterangan, jumlah, tipe } = req.body;
-
     if (!id_akun || !jumlah || !tipe || !tanggal) {
         return res.status(400).json({ message: 'Input tidak lengkap.' });
     }
 
-    const connection = await db.getConnection();
+    const client = await db.getClient();
 
     try {
-        await connection.beginTransaction();
+        await client.query('BEGIN');
 
-        // 1. Ambil data transaksi LAMA sebelum diubah
-        const [rows] = await connection.query('SELECT * FROM transaksi WHERE id = ?', [id]);
+        const { rows } = await client.query('SELECT * FROM transaksi WHERE id = $1', [id]);
         if (rows.length === 0) {
             throw new Error('Transaksi tidak ditemukan.');
         }
         const trxLama = rows[0];
 
-        // 2. Batalkan efek transaksi LAMA pada saldo akunnya
         const jumlahBatal = trxLama.tipe === 'pemasukan' ? -parseFloat(trxLama.jumlah) : parseFloat(trxLama.jumlah);
-        await connection.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + ? WHERE id = ?', [jumlahBatal, trxLama.id_akun]);
+        await client.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2', [jumlahBatal, trxLama.id_akun]);
+        
+        const updateQuery = 'UPDATE transaksi SET id_akun = $1, id_kategori = $2, tanggal = $3, keterangan = $4, jumlah = $5, tipe = $6 WHERE id = $7';
+        await client.query(updateQuery, [id_akun, id_kategori, tanggal, keterangan, jumlah, tipe, id]);
 
-        // 3. Update data transaksi di tabel 'transaksi' dengan data BARU
-        const updateQuery = 'UPDATE transaksi SET id_akun = ?, id_kategori = ?, tanggal = ?, keterangan = ?, jumlah = ?, tipe = ? WHERE id = ?';
-        await connection.query(updateQuery, [id_akun, id_kategori, tanggal, keterangan, jumlah, tipe, id]);
-
-        // 4. Terapkan efek transaksi BARU pada saldo akunnya (bisa jadi akun yang sama atau berbeda)
         const jumlahBaru = tipe === 'pemasukan' ? parseFloat(jumlah) : -parseFloat(jumlah);
-        await connection.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + ? WHERE id = ?', [jumlahBaru, id_akun]);
+        await client.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2', [jumlahBaru, id_akun]);
 
-        await connection.commit();
+        await client.query('COMMIT');
         res.status(200).json({ message: 'Transaksi berhasil diperbarui!' });
-
     } catch (error) {
-        await connection.rollback();
+        await client.query('ROLLBACK');
         console.error('Error saat update transaksi:', error);
         res.status(500).json({ message: 'Gagal memperbarui transaksi.', error: error.message });
     } finally {
-        connection.release();
+        client.release();
     }
 });
 
 
-// Endpoint BARU: GET - Mendapatkan ringkasan pemasukan & pengeluaran bulan ini
+// --- FUNGSI TANGGAL DIUBAH DARI MONTH()/YEAR() MENJADI EXTRACT() UNTUK POSTGRES ---
+
+// Endpoint GET - Mendapatkan ringkasan pemasukan & pengeluaran bulan ini
 router.get('/ringkasan/bulan-ini', async (req, res) => {
     try {
         const query = `
@@ -241,23 +209,18 @@ router.get('/ringkasan/bulan-ini', async (req, res) => {
                 SUM(jumlah) AS total
             FROM transaksi
             WHERE
-                MONTH(tanggal) = MONTH(CURRENT_DATE()) AND
-                YEAR(tanggal) = YEAR(CURRENT_DATE())
+                EXTRACT(MONTH FROM tanggal) = EXTRACT(MONTH FROM CURRENT_DATE) AND
+                EXTRACT(YEAR FROM tanggal) = EXTRACT(YEAR FROM CURRENT_DATE)
             GROUP BY tipe;
         `;
-        const [results] = await db.query(query);
+        const { rows } = await db.query(query);
 
-        // Proses hasilnya menjadi format yang mudah dipakai
-        const ringkasan = {
-            pemasukan: 0,
-            pengeluaran: 0
-        };
-
-        results.forEach(row => {
+        const ringkasan = { pemasukan: 0, pengeluaran: 0 };
+        rows.forEach(row => {
             if (row.tipe === 'pemasukan') {
-                ringkasan.pemasukan = parseFloat(row.total);
+                ringkasan.pemasukan = parseFloat(row.total) || 0;
             } else if (row.tipe === 'pengeluaran') {
-                ringkasan.pengeluaran = parseFloat(row.total);
+                ringkasan.pengeluaran = parseFloat(row.total) || 0;
             }
         });
 
@@ -268,7 +231,7 @@ router.get('/ringkasan/bulan-ini', async (req, res) => {
     }
 });
 
-// Endpoint BARU: GET - Laporan pengeluaran per kategori bulan ini
+// Endpoint GET - Laporan pengeluaran per kategori bulan ini
 router.get('/laporan/pengeluaran-by-kategori', async (req, res) => {
     try {
         const query = `
@@ -279,14 +242,14 @@ router.get('/laporan/pengeluaran-by-kategori', async (req, res) => {
             JOIN kategori k ON t.id_kategori = k.id
             WHERE
                 t.tipe = 'pengeluaran' AND
-                MONTH(t.tanggal) = MONTH(CURRENT_DATE()) AND
-                YEAR(t.tanggal) = YEAR(CURRENT_DATE())
+                EXTRACT(MONTH FROM t.tanggal) = EXTRACT(MONTH FROM CURRENT_DATE) AND
+                EXTRACT(YEAR FROM t.tanggal) = EXTRACT(YEAR FROM CURRENT_DATE)
             GROUP BY k.nama_kategori
-            HAVING total > 0
+            HAVING SUM(t.jumlah) > 0
             ORDER BY total DESC;
         `;
-        const [results] = await db.query(query);
-        res.status(200).json(results);
+        const { rows } = await db.query(query);
+        res.status(200).json(rows);
     } catch (error) {
         console.error('Error saat mengambil laporan pengeluaran:', error);
         res.status(500).json({ message: 'Gagal mengambil laporan', error: error.message });
