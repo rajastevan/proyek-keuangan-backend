@@ -159,6 +159,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Endpoint PUT - Mengubah/mengedit transaksi
+// Endpoint PUT - Mengubah/mengedit transaksi (DENGAN LOGIKA BARU YANG BENAR)
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
     const { id_akun, id_kategori, tanggal, keterangan, jumlah, tipe } = req.body;
@@ -171,23 +172,29 @@ router.put('/:id', async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // 1. Ambil data transaksi LAMA sebelum diubah
         const { rows } = await client.query('SELECT * FROM transaksi WHERE id = $1', [id]);
         if (rows.length === 0) {
             throw new Error('Transaksi tidak ditemukan.');
         }
         const trxLama = rows[0];
+        const akunLamaId = trxLama.id_akun;
 
+        // 2. Batalkan efek transaksi LAMA pada saldo akun LAMA
         const jumlahBatal = trxLama.tipe === 'pemasukan' ? -parseFloat(trxLama.jumlah) : parseFloat(trxLama.jumlah);
-        await client.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2', [jumlahBatal, trxLama.id_akun]);
-        
+        await client.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2', [jumlahBatal, akunLamaId]);
+
+        // 3. Update data transaksi di tabel 'transaksi' dengan data BARU
         const updateQuery = 'UPDATE transaksi SET id_akun = $1, id_kategori = $2, tanggal = $3, keterangan = $4, jumlah = $5, tipe = $6 WHERE id = $7';
         await client.query(updateQuery, [id_akun, id_kategori, tanggal, keterangan, jumlah, tipe, id]);
 
+        // 4. Terapkan efek transaksi BARU pada saldo akun BARU (id_akun dari req.body)
         const jumlahBaru = tipe === 'pemasukan' ? parseFloat(jumlah) : -parseFloat(jumlah);
         await client.query('UPDATE akun SET saldo_saat_ini = saldo_saat_ini + $1 WHERE id = $2', [jumlahBaru, id_akun]);
 
         await client.query('COMMIT');
         res.status(200).json({ message: 'Transaksi berhasil diperbarui!' });
+
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error saat update transaksi:', error);
